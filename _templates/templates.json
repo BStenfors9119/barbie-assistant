@@ -1,0 +1,149 @@
+[
+  {
+    "id": "expense_reports_by_employee",
+    "group": "Expense Reports",
+    "name": "Expense Reports by Employee",
+    "description": "All expense reports submitted by a specific employee",
+    "sql": "SELECT\n    REPORT_ID,\n    REPORT_NAME,\n    SUBMIT_DATE,\n    APPROVAL_DATE,\n    PAYMENT_DATE,\n    REPORT_TOTAL,\n    APPROVED_AMOUNT,\n    CURRENCY_CODE,\n    REPORT_STATUS_CODE,\n    BUSINESS_PURPOSE\nFROM EXPENSE_REPORT\nWHERE LOGIN_ID = '{employee_email}'\nORDER BY SUBMIT_DATE DESC"
+  },
+  {
+    "id": "expense_reports_pending_approval",
+    "group": "Expense Reports",
+    "name": "Expense Reports Pending Approval",
+    "description": "All reports currently awaiting approval",
+    "sql": "SELECT\n    REPORT_ID,\n    REPORT_NAME,\n    EMPLOYEE_NAME,\n    LOGIN_ID,\n    SUBMIT_DATE,\n    REPORT_TOTAL,\n    CURRENCY_CODE,\n    COST_CENTER_CODE,\n    BUSINESS_PURPOSE\nFROM EXPENSE_REPORT\nWHERE REPORT_STATUS_CODE = 'A_PEND'\nORDER BY SUBMIT_DATE ASC"
+  },
+  {
+    "id": "expense_reports_by_date_range",
+    "group": "Expense Reports",
+    "name": "Expense Reports by Date Range",
+    "description": "Reports submitted within a date range",
+    "sql": "SELECT\n    REPORT_ID,\n    REPORT_NAME,\n    EMPLOYEE_NAME,\n    LOGIN_ID,\n    SUBMIT_DATE,\n    APPROVAL_DATE,\n    REPORT_TOTAL,\n    APPROVED_AMOUNT,\n    CURRENCY_CODE,\n    REPORT_STATUS_CODE\nFROM EXPENSE_REPORT\nWHERE SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY SUBMIT_DATE DESC"
+  },
+  {
+    "id": "expense_reports_by_cost_center",
+    "group": "Expense Reports",
+    "name": "Expense Reports by Cost Center",
+    "description": "All reports charged to a specific cost center",
+    "sql": "SELECT\n    r.REPORT_ID,\n    r.REPORT_NAME,\n    r.EMPLOYEE_NAME,\n    r.SUBMIT_DATE,\n    r.APPROVAL_DATE,\n    r.REPORT_TOTAL,\n    r.APPROVED_AMOUNT,\n    r.CURRENCY_CODE,\n    r.REPORT_STATUS_CODE\nFROM EXPENSE_REPORT r\nWHERE r.COST_CENTER_CODE = '{cost_center}'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY r.SUBMIT_DATE DESC"
+  },
+  {
+    "id": "expense_entries_with_exceptions",
+    "group": "Expense Reports",
+    "name": "Expense Entries with Policy Exceptions",
+    "description": "Line items flagged as policy violations",
+    "sql": "SELECT\n    e.REPORT_ID,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    e.EXPENSE_TYPE_NAME,\n    e.TRANSACTION_DATE,\n    e.TRANSACTION_AMOUNT,\n    e.TRANSACTION_CURRENCY,\n    e.VENDOR_DESCRIPTION,\n    e.COMMENT\nFROM EXPENSE_ENTRY e\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = e.REPORT_ID\nWHERE e.HAS_EXCEPTION = 'Y'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY e.TRANSACTION_AMOUNT DESC"
+  },
+  {
+    "id": "missing_receipts",
+    "group": "Expense Reports",
+    "name": "Entries with Missing Receipts",
+    "description": "Expense entries where a receipt is required but not received",
+    "sql": "SELECT\n    e.REPORT_ID,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    e.EXPENSE_TYPE_NAME,\n    e.TRANSACTION_DATE,\n    e.TRANSACTION_AMOUNT,\n    e.TRANSACTION_CURRENCY,\n    e.VENDOR_DESCRIPTION,\n    r.REPORT_STATUS_CODE\nFROM EXPENSE_ENTRY e\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = e.REPORT_ID\nWHERE e.RECEIPT_REQUIRED = 'Y'\n  AND e.RECEIPT_RECEIVED = 'N'\nORDER BY e.TRANSACTION_AMOUNT DESC"
+  },
+  {
+    "id": "top_spenders_by_expense_type",
+    "group": "Expense Reports",
+    "name": "Top Spenders by Expense Type",
+    "description": "Employees with the highest approved spend for a given expense type",
+    "sql": "SELECT\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    r.COST_CENTER_CODE,\n    e.EXPENSE_TYPE_NAME,\n    SUM(e.APPROVED_AMOUNT) AS TOTAL_APPROVED,\n    e.APPROVED_CURRENCY,\n    COUNT(DISTINCT r.REPORT_ID) AS REPORT_COUNT\nFROM EXPENSE_ENTRY e\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = e.REPORT_ID\nWHERE e.EXPENSE_TYPE_CODE = '{expense_type_code}'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nGROUP BY\n    r.EMPLOYEE_NAME, r.LOGIN_ID, r.COST_CENTER_CODE,\n    e.EXPENSE_TYPE_NAME, e.APPROVED_CURRENCY\nORDER BY TOTAL_APPROVED DESC"
+  },
+  {
+    "id": "expense_by_type_summary",
+    "group": "Expense Reports",
+    "name": "Expense Summary by Type",
+    "description": "Total approved spend grouped by expense type for a period",
+    "sql": "SELECT\n    e.EXPENSE_TYPE_CODE,\n    e.EXPENSE_TYPE_NAME,\n    COUNT(*) AS ENTRY_COUNT,\n    SUM(e.TRANSACTION_AMOUNT) AS TOTAL_TRANSACTION,\n    SUM(e.APPROVED_AMOUNT) AS TOTAL_APPROVED,\n    e.APPROVED_CURRENCY\nFROM EXPENSE_ENTRY e\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = e.REPORT_ID\nWHERE r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nGROUP BY e.EXPENSE_TYPE_CODE, e.EXPENSE_TYPE_NAME, e.APPROVED_CURRENCY\nORDER BY TOTAL_APPROVED DESC"
+  },
+  {
+    "id": "allocation_by_project",
+    "group": "Allocations",
+    "name": "Expense Allocations by Project Code",
+    "description": "All expense entries allocated to a specific project",
+    "sql": "SELECT\n    a.REPORT_ID,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    e.EXPENSE_TYPE_NAME,\n    e.TRANSACTION_DATE,\n    a.AMOUNT,\n    a.PERCENTAGE,\n    a.CURRENCY_CODE,\n    a.GL_ACCOUNT,\n    a.COST_CENTER,\n    a.PROJECT_CODE\nFROM EXPENSE_ALLOCATION a\nJOIN EXPENSE_ENTRY e ON e.REPORT_ID = a.REPORT_ID AND e.ENTRY_ID = a.ENTRY_ID\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = a.REPORT_ID\nWHERE a.PROJECT_CODE = '{project_code}'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY e.TRANSACTION_DATE DESC"
+  },
+  {
+    "id": "allocation_by_gl_account",
+    "group": "Allocations",
+    "name": "Expense Allocations by G/L Account",
+    "description": "All allocated amounts posted to a specific G/L account",
+    "sql": "SELECT\n    a.REPORT_ID,\n    r.EMPLOYEE_NAME,\n    r.SUBMIT_DATE,\n    e.EXPENSE_TYPE_NAME,\n    a.COST_CENTER,\n    a.GL_ACCOUNT,\n    a.AMOUNT,\n    a.CURRENCY_CODE\nFROM EXPENSE_ALLOCATION a\nJOIN EXPENSE_ENTRY e ON e.REPORT_ID = a.REPORT_ID AND e.ENTRY_ID = a.ENTRY_ID\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = a.REPORT_ID\nWHERE a.GL_ACCOUNT = '{gl_account}'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY r.SUBMIT_DATE DESC"
+  },
+  {
+    "id": "travel_requests_pending",
+    "group": "Travel Requests",
+    "name": "Travel Requests Pending Approval",
+    "description": "Pre-trip requests awaiting approval",
+    "sql": "SELECT\n    REQUEST_ID,\n    REQUEST_NAME,\n    LOGIN_ID,\n    SUBMIT_DATE,\n    START_DATE,\n    END_DATE,\n    DESTINATION,\n    TOTAL_APPROVED_AMOUNT,\n    CURRENCY_CODE,\n    TRIP_PURPOSE\nFROM TRAVEL_REQUEST\nWHERE REQUEST_STATUS_CODE = 'PendingApproval'\nORDER BY SUBMIT_DATE ASC"
+  },
+  {
+    "id": "travel_requests_by_employee",
+    "group": "Travel Requests",
+    "name": "Travel Requests by Employee",
+    "description": "All travel requests for a specific employee",
+    "sql": "SELECT\n    REQUEST_ID,\n    REQUEST_NAME,\n    SUBMIT_DATE,\n    APPROVAL_DATE,\n    START_DATE,\n    END_DATE,\n    DESTINATION,\n    TOTAL_APPROVED_AMOUNT,\n    CURRENCY_CODE,\n    REQUEST_STATUS_CODE\nFROM TRAVEL_REQUEST\nWHERE LOGIN_ID = '{employee_email}'\nORDER BY START_DATE DESC"
+  },
+  {
+    "id": "travel_request_segments_air",
+    "group": "Travel Requests",
+    "name": "Air Segments for a Travel Request",
+    "description": "All air travel segments within a specific request",
+    "sql": "SELECT\n    s.REQUEST_ID,\n    s.SEGMENT_ID,\n    s.ORIGIN,\n    s.DESTINATION,\n    s.DEPARTURE_DATE,\n    s.ARRIVAL_DATE,\n    s.VENDOR_NAME,\n    s.ESTIMATED_AMOUNT,\n    s.CURRENCY_CODE,\n    s.BOOKING_STATUS\nFROM TRAVEL_REQUEST_SEGMENT s\nWHERE s.REQUEST_ID = '{request_id}'\n  AND s.SEGMENT_TYPE = 'AIR'\nORDER BY s.DEPARTURE_DATE"
+  },
+  {
+    "id": "upcoming_travel_by_date",
+    "group": "Travel Requests",
+    "name": "Upcoming Travel by Date Range",
+    "description": "Approved trips with departure dates in a given window",
+    "sql": "SELECT\n    r.REQUEST_ID,\n    r.REQUEST_NAME,\n    r.LOGIN_ID,\n    r.START_DATE,\n    r.END_DATE,\n    r.DESTINATION,\n    r.TOTAL_APPROVED_AMOUNT,\n    r.CURRENCY_CODE,\n    r.TRIP_PURPOSE\nFROM TRAVEL_REQUEST r\nWHERE r.REQUEST_STATUS_CODE = 'Approved'\n  AND r.START_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY r.START_DATE"
+  },
+  {
+    "id": "employee_list_active",
+    "group": "Employees",
+    "name": "Active Employees",
+    "description": "All active Concur user accounts",
+    "sql": "SELECT\n    EMPLOYEE_ID,\n    LOGIN_ID,\n    FIRST_NAME,\n    LAST_NAME,\n    EMAIL,\n    DEPARTMENT,\n    COST_CENTER,\n    COUNTRY_CODE,\n    POLICY_GROUP\nFROM EMPLOYEE\nWHERE EMPLOYEE_STATUS = 'Active'\nORDER BY LAST_NAME, FIRST_NAME"
+  },
+  {
+    "id": "employees_by_cost_center",
+    "group": "Employees",
+    "name": "Employees by Cost Center",
+    "description": "All employees assigned to a specific cost center",
+    "sql": "SELECT\n    EMPLOYEE_ID,\n    LOGIN_ID,\n    FIRST_NAME,\n    LAST_NAME,\n    EMAIL,\n    DEPARTMENT,\n    EMPLOYEE_STATUS,\n    POLICY_GROUP\nFROM EMPLOYEE\nWHERE COST_CENTER = '{cost_center}'\nORDER BY LAST_NAME, FIRST_NAME"
+  },
+  {
+    "id": "employees_by_manager",
+    "group": "Employees",
+    "name": "Direct Reports by Manager",
+    "description": "All employees reporting to a specific manager",
+    "sql": "SELECT\n    e.EMPLOYEE_ID,\n    e.LOGIN_ID,\n    e.FIRST_NAME,\n    e.LAST_NAME,\n    e.DEPARTMENT,\n    e.COST_CENTER,\n    e.EMPLOYEE_STATUS\nFROM EMPLOYEE e\nWHERE e.MANAGER_EMPLOYEE_ID = (\n    SELECT EMPLOYEE_ID FROM EMPLOYEE WHERE LOGIN_ID = '{manager_email}'\n)\nORDER BY e.LAST_NAME, e.FIRST_NAME"
+  },
+  {
+    "id": "payment_batch_detail",
+    "group": "Payments",
+    "name": "Payment Batch Detail",
+    "description": "All reports included in a specific payment batch",
+    "sql": "SELECT\n    p.BATCH_ID,\n    p.REPORT_ID,\n    r.REPORT_NAME,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    p.PAYMENT_DATE,\n    p.PAYMENT_AMOUNT,\n    p.CURRENCY_CODE,\n    p.PAYMENT_TYPE,\n    p.PAYMENT_STATUS\nFROM PAYMENT_BATCH p\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = p.REPORT_ID\nWHERE p.BATCH_ID = '{batch_id}'\nORDER BY r.EMPLOYEE_NAME"
+  },
+  {
+    "id": "payments_by_employee",
+    "group": "Payments",
+    "name": "Payments by Employee",
+    "description": "All reimbursement payments made to a specific employee",
+    "sql": "SELECT\n    p.BATCH_ID,\n    p.REPORT_ID,\n    r.REPORT_NAME,\n    p.PAYMENT_DATE,\n    p.PAYMENT_AMOUNT,\n    p.CURRENCY_CODE,\n    p.PAYMENT_TYPE,\n    p.PAYMENT_STATUS\nFROM PAYMENT_BATCH p\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = p.REPORT_ID\nWHERE r.LOGIN_ID = '{employee_email}'\nORDER BY p.PAYMENT_DATE DESC"
+  },
+  {
+    "id": "unpaid_approved_reports",
+    "group": "Payments",
+    "name": "Approved Reports Not Yet Paid",
+    "description": "Reports that are fully approved but have no payment date",
+    "sql": "SELECT\n    r.REPORT_ID,\n    r.REPORT_NAME,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    r.APPROVAL_DATE,\n    r.APPROVED_AMOUNT,\n    r.CURRENCY_CODE,\n    r.COST_CENTER_CODE\nFROM EXPENSE_REPORT r\nLEFT JOIN PAYMENT_BATCH p ON p.REPORT_ID = r.REPORT_ID\nWHERE r.REPORT_STATUS_CODE = 'A_APVD'\n  AND p.BATCH_ID IS NULL\nORDER BY r.APPROVAL_DATE ASC"
+  },
+  {
+    "id": "attendee_spend_by_employee",
+    "group": "Attendees",
+    "name": "Entertainment Spend with Attendees",
+    "description": "Meals and entertainment entries with attendee detail",
+    "sql": "SELECT\n    r.REPORT_ID,\n    r.EMPLOYEE_NAME,\n    r.LOGIN_ID,\n    e.TRANSACTION_DATE,\n    e.TRANSACTION_AMOUNT,\n    e.TRANSACTION_CURRENCY,\n    e.VENDOR_DESCRIPTION,\n    a.FIRST_NAME,\n    a.LAST_NAME,\n    a.COMPANY,\n    a.ATTENDEE_TYPE,\n    a.AMOUNT AS AMOUNT_PER_ATTENDEE\nFROM EXPENSE_ATTENDEE a\nJOIN EXPENSE_ENTRY e ON e.REPORT_ID = a.REPORT_ID AND e.ENTRY_ID = a.ENTRY_ID\nJOIN EXPENSE_REPORT r ON r.REPORT_ID = e.REPORT_ID\nWHERE r.LOGIN_ID = '{employee_email}'\n  AND r.SUBMIT_DATE BETWEEN '{start_date}' AND '{end_date}'\nORDER BY e.TRANSACTION_DATE DESC"
+  }
+]
