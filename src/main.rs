@@ -15,5 +15,6 @@ fn main() -> iced::Result {
         app::App::view,
     )
     .theme(app::App::theme)
+    .subscription(app::App::subscription)
     .run()
 }

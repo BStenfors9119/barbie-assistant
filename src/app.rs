@@ -19,6 +19,18 @@ use crate::user_templates::UserTemplate;
 const FONT_MIN: u16 = 10;
 const FONT_MAX: u16 = 28;
 
+// ── Resizable panel divider ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+enum ScratchDivider {
+    /// Divider between the Tables sidebar and the rest.
+    Tables,
+    /// Divider between the Fields column and the Column Order column.
+    Fields,
+    /// Horizontal divider above the SQL editor — drag up/down to resize its height.
+    SqlHeight,
+}
+
 // ── Query customiser ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -354,12 +366,45 @@ pub struct App {
     scratch_drag_idx: Option<usize>,
     /// Index of the column row the cursor is hovering over during a drag.
     scratch_hover_idx: Option<usize>,
-    /// Set when opening the default email client fails.
+    /// Set when opening the email client fails (error text).
     email_error: Option<String>,
+    /// True when no known email client was found — shows copy-paste instructions.
+    email_fallback: bool,
     /// Table names found in pasted SQL that don't exist in the schema.
     scratch_unknown_tables: Vec<String>,
     /// Qualified column names (TABLE.COLUMN or bare) from pasted SQL not found in schema.
     scratch_unknown_columns: Vec<String>,
+    /// Which table's name is pinned in the sticky subheader of the fields panel.
+    scratch_active_table: Option<String>,
+    /// Absolute Y scroll offset of the fields panel (used to drive the sticky header).
+    scratch_fields_scroll_y: f32,
+    /// Collapse state for each From Scratch panel.
+    scratch_tables_collapsed: bool,
+    scratch_fields_collapsed: bool,
+    scratch_order_collapsed: bool,
+    /// Pixel width of the Tables sidebar (drag-resizable).
+    scratch_tables_width: f32,
+    /// Pixel width of the Fields column (drag-resizable).
+    scratch_fields_width: f32,
+    /// Which panel divider is currently being dragged, if any.
+    scratch_divider_drag: Option<ScratchDivider>,
+    /// Cursor X when the drag started.
+    scratch_divider_origin_x: f32,
+    /// Panel width when the drag started.
+    scratch_divider_origin_w: f32,
+    /// Last known cursor position (updated every mouse-move event).
+    cursor_x: f32,
+    cursor_y: f32,
+    /// Height of the SQL editor in the From Scratch tab (drag-resizable).
+    scratch_sql_height: f32,
+    /// Whether the "Save as Template" form is open in the From Scratch tab.
+    scratch_save_open: bool,
+    /// Template name field in the save form.
+    scratch_save_name: String,
+    /// Template description field in the save form.
+    scratch_save_desc: String,
+    /// Validation / save error shown inside the form.
+    scratch_save_error: Option<String>,
 }
 
 impl Default for App {
@@ -390,8 +435,26 @@ impl Default for App {
             scratch_drag_idx: None,
             scratch_hover_idx: None,
             email_error: None,
+            email_fallback: false,
             scratch_unknown_tables: Vec::new(),
             scratch_unknown_columns: Vec::new(),
+            scratch_active_table: None,
+            scratch_fields_scroll_y: 0.0,
+            scratch_tables_collapsed: false,
+            scratch_fields_collapsed: false,
+            scratch_order_collapsed: false,
+            scratch_tables_width: 220.0,
+            scratch_fields_width: 300.0,
+            scratch_divider_drag: None,
+            scratch_divider_origin_x: 0.0,
+            scratch_divider_origin_w: 0.0,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            scratch_sql_height: 4000.0,
+            scratch_save_open: false,
+            scratch_save_name: String::new(),
+            scratch_save_desc: String::new(),
+            scratch_save_error: None,
         }
     }
 }
@@ -446,8 +509,22 @@ pub enum Message {
     EmailSql(String),
     EmailOpened,
     EmailFailed(String),
+    EmailClientNotFound,
     ResetTemplates,
     ResetScratch,
+    CopyText(String),
+    ScratchFieldsScrolled(f32),
+    ScratchShowSaveForm,
+    ScratchCloseSaveForm,
+    ScratchSaveNameInput(String),
+    ScratchSaveDescInput(String),
+    ScratchSaveAsTemplate,
+    ScratchToggleTables,
+    ScratchToggleFields,
+    ScratchToggleOrder,
+    ScratchDividerPress(ScratchDivider),
+    ScratchDividerRelease,
+    CursorMoved(f32, f32),
     Noop,
 }
 
@@ -456,6 +533,18 @@ pub enum Message {
 impl App {
     pub fn title(&self) -> String {
         "STM Query Builder".to_string()
+    }
+
+    pub fn subscription(&self) -> iced::Subscription<Message> {
+        iced::event::listen_with(|event, _status, _id| match event {
+            iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                Some(Message::CursorMoved(position.x, position.y))
+            }
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )) => Some(Message::ScratchDividerRelease),
+            _ => None,
+        })
     }
 
     pub fn theme(&self) -> Theme {
@@ -788,26 +877,144 @@ impl App {
             }
             Message::EmailSql(sql) => {
                 self.email_error = None;
+                self.email_fallback = false;
                 if !sql.trim().is_empty() {
                     let body = percent_encode(&sql);
                     let uri = format!("mailto:?subject=SQL%20Query&body={body}");
                     return Task::perform(
-                        tokio::task::spawn_blocking(move || {
-                            open::that(uri).map_err(|e| e.to_string())
-                        }),
+                        tokio::task::spawn_blocking(move || launch_email_client(uri)),
                         |res| match res {
-                            Ok(Ok(())) => Message::EmailOpened,
-                            Ok(Err(e)) => Message::EmailFailed(e),
-                            Err(e)     => Message::EmailFailed(e.to_string()),
+                            Ok(Ok(true))  => Message::EmailOpened,
+                            Ok(Ok(false)) => Message::EmailClientNotFound,
+                            Ok(Err(e))    => Message::EmailFailed(e),
+                            Err(e)        => Message::EmailFailed(e.to_string()),
                         },
                     );
                 }
             }
             Message::EmailOpened => {
                 self.email_error = None;
+                self.email_fallback = false;
+            }
+            Message::EmailClientNotFound => {
+                self.email_fallback = true;
+                self.email_error = None;
             }
             Message::EmailFailed(e) => {
-                self.email_error = Some(format!("Could not open email client: {e}"));
+                self.email_fallback = false;
+                self.email_error = Some(format!("Could not launch email client: {e}"));
+            }
+            Message::CopyText(text) => {
+                return iced::clipboard::write(text);
+            }
+            Message::ScratchFieldsScrolled(y) => {
+                self.scratch_fields_scroll_y = y;
+                self.scratch_active_table = fields_active_table_at(
+                    &self.scratch_joins, y, self.font_size as f32,
+                );
+            }
+            Message::ScratchShowSaveForm => {
+                // Pre-populate name from the joined table names.
+                if self.scratch_save_name.is_empty() {
+                    let tables = self
+                        .scratch_joins
+                        .iter()
+                        .filter(|(t, _)| !self.scratch_auto_added.contains(t))
+                        .map(|(t, _)| t.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    self.scratch_save_name = tables;
+                }
+                self.scratch_save_open = true;
+                self.scratch_save_error = None;
+            }
+            Message::ScratchCloseSaveForm => {
+                self.scratch_save_open = false;
+                self.scratch_save_error = None;
+            }
+            Message::ScratchSaveNameInput(v) => {
+                self.scratch_save_name = v;
+                self.scratch_save_error = None;
+            }
+            Message::ScratchSaveDescInput(v) => {
+                self.scratch_save_desc = v;
+            }
+            Message::ScratchSaveAsTemplate => {
+                let name = self.scratch_save_name.trim().to_string();
+                let sql  = self.scratch_sql.text();
+                if name.is_empty() {
+                    self.scratch_save_error = Some("Template name is required.".to_string());
+                } else if sql.trim().is_empty() {
+                    self.scratch_save_error = Some("Generate a query first.".to_string());
+                } else {
+                    // Build a stable ID from the name.
+                    let id: String = name
+                        .to_lowercase()
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                        .collect();
+                    let ut = UserTemplate {
+                        id,
+                        name,
+                        description: self.scratch_save_desc.trim().to_string(),
+                        sql,
+                    };
+                    self.user_templates.push(ut);
+                    UserTemplate::save_all(&self.user_templates);
+                    // Close form and reset fields.
+                    self.scratch_save_open  = false;
+                    self.scratch_save_name  = String::new();
+                    self.scratch_save_desc  = String::new();
+                    self.scratch_save_error = None;
+                    // Switch to the Templates tab so the user can see the new entry.
+                    self.main_tab = MainTab::Templates;
+                }
+            }
+            Message::ScratchToggleTables => {
+                self.scratch_tables_collapsed = !self.scratch_tables_collapsed;
+            }
+            Message::ScratchToggleFields => {
+                self.scratch_fields_collapsed = !self.scratch_fields_collapsed;
+            }
+            Message::ScratchToggleOrder => {
+                self.scratch_order_collapsed = !self.scratch_order_collapsed;
+            }
+            Message::ScratchDividerPress(divider) => {
+                let (origin_pos, origin_w) = match &divider {
+                    ScratchDivider::Tables    => (self.cursor_x, self.scratch_tables_width),
+                    ScratchDivider::Fields    => (self.cursor_x, self.scratch_fields_width),
+                    ScratchDivider::SqlHeight => (self.cursor_y, self.scratch_sql_height),
+                };
+                self.scratch_divider_drag = Some(divider);
+                self.scratch_divider_origin_x = origin_pos;
+                self.scratch_divider_origin_w = origin_w;
+            }
+            Message::ScratchDividerRelease => {
+                self.scratch_divider_drag = None;
+            }
+            Message::CursorMoved(x, y) => {
+                self.cursor_x = x;
+                self.cursor_y = y;
+                if let Some(ref div) = self.scratch_divider_drag.clone() {
+                    match div {
+                        ScratchDivider::Tables => {
+                            let dx = x - self.scratch_divider_origin_x;
+                            self.scratch_tables_width =
+                                (self.scratch_divider_origin_w + dx).clamp(80.0, 500.0);
+                        }
+                        ScratchDivider::Fields => {
+                            let dx = x - self.scratch_divider_origin_x;
+                            self.scratch_fields_width =
+                                (self.scratch_divider_origin_w + dx).clamp(80.0, 800.0);
+                        }
+                        ScratchDivider::SqlHeight => {
+                            // Drag down (dy > 0) → editor grows; drag up → editor shrinks.
+                            let dy = y - self.scratch_divider_origin_x;
+                            self.scratch_sql_height =
+                                (self.scratch_divider_origin_w + dy).clamp(60.0, 4000.0);
+                        }
+                    }
+                }
             }
             Message::Noop => {}
         }
@@ -825,6 +1032,11 @@ impl App {
         let (joins, auto_added) = plan_joins(&self.scratch_tables);
         self.scratch_joins = joins;
         self.scratch_auto_added = auto_added;
+
+        // Reset scroll and recalculate sticky label when table set changes.
+        self.scratch_fields_scroll_y = 0.0;
+        self.scratch_active_table = self.scratch_joins.first().map(|(t, _)| t.clone());
+
         let sql = self.build_scratch_sql();
         self.scratch_sql = text_editor::Content::with_text(&sql);
     }
@@ -1157,27 +1369,91 @@ impl App {
             }
         }
 
-        let left = container(
-            column![
-                text("TABLES").size(fs - 3.0).color(iced::Color { a: 0.5, r: 0.5, g: 0.5, b: 0.5 }),
-                scrollable(column(table_checks).spacing(10).padding([4, 4]))
-                    .height(Length::Fill),
-            ]
-            .spacing(8)
-            .padding([10, 8])
-            .height(Length::Fill),
-        )
-        .width(Length::Fixed(220.0))
-        .height(Length::Fill)
-        .style(|theme: &Theme| {
-            let pal = theme.extended_palette();
-            container::Style {
-                background: Some(
-                    mix(pal.background.base.color, pal.primary.base.color, 0.14).into(),
-                ),
-                ..Default::default()
-            }
-        });
+        let tables_arrow = if self.scratch_tables_collapsed { "▶" } else { "◀" };
+        let tables_width = if self.scratch_tables_collapsed {
+            Length::Fixed(32.0)
+        } else {
+            Length::Fixed(self.scratch_tables_width)
+        };
+
+        let left: Element<Message> = if self.scratch_tables_collapsed {
+            // Collapsed: narrow strip with a button to re-expand
+            container(
+                button(
+                    text(format!("{} TABLES", tables_arrow)).size(fs - 3.0)
+                        .color(iced::Color { a: 0.6, r: 0.6, g: 0.7, b: 0.9 }),
+                )
+                .on_press(Message::ScratchToggleTables)
+                .padding([8, 6])
+                .style(|_theme: &Theme, _status| button::Style {
+                    background: None,
+                    text_color: Color::TRANSPARENT,
+                    border: Border::default(),
+                    shadow: iced::Shadow::default(),
+                })
+                .width(Length::Fill),
+            )
+            .width(tables_width)
+            .height(Length::Fill)
+            .style(|theme: &Theme| {
+                let pal = theme.extended_palette();
+                container::Style {
+                    background: Some(
+                        mix(pal.background.base.color, pal.primary.base.color, 0.14).into(),
+                    ),
+                    ..Default::default()
+                }
+            })
+            .into()
+        } else {
+            // Expanded: full table list with a header that can collapse
+            let header = button(
+                row![
+                    text("TABLES").size(fs - 3.0)
+                        .color(iced::Color { a: 0.5, r: 0.5, g: 0.5, b: 0.5 }),
+                    horizontal_space(),
+                    text(tables_arrow).size(fs - 3.0)
+                        .color(iced::Color { a: 0.4, r: 0.5, g: 0.5, b: 0.5 }),
+                ]
+                .align_y(Vertical::Center),
+            )
+            .on_press(Message::ScratchToggleTables)
+            .padding([0, 0])
+            .width(Length::Fill)
+            .style(|_theme: &Theme, _status| button::Style {
+                background: None,
+                text_color: Color::TRANSPARENT,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+            });
+
+            container(
+                column![
+                    header,
+                    scrollable(column(table_checks).spacing(10).padding([4, 4]))
+                        .height(Length::Fill),
+                ]
+                .spacing(8)
+                .padding([10, 8])
+                .height(Length::Fill),
+            )
+            .width(tables_width)
+            .height(Length::Fill)
+            .style(|theme: &Theme| {
+                let pal = theme.extended_palette();
+                container::Style {
+                    background: Some(
+                        mix(pal.background.base.color, pal.primary.base.color, 0.14).into(),
+                    ),
+                    ..Default::default()
+                }
+            })
+            .into()
+        };
+
+        // Drag handle between Tables sidebar and the rest
+        let tables_drag_active = self.scratch_divider_drag == Some(ScratchDivider::Tables);
+        let tables_divider = scratch_divider(ScratchDivider::Tables, tables_drag_active);
 
         // ── Right: column selector + SQL output ───────────────────────────────
         let right: Element<Message> = if self.scratch_joins.is_empty() {
@@ -1216,11 +1492,11 @@ impl App {
                 None
             };
 
-            // Column checkboxes grouped by effective table (in join order)
-            let effective_tables: Vec<&str> = self.scratch_joins.iter().map(|(t, _)| t.as_str()).collect();
+            // ── Column picker (left half of right panel) ──────────────────
 
+            // Rebuild full col_groups list: all joined tables + all their fields
             let mut col_groups: Vec<Element<Message>> = Vec::new();
-            for tname in &effective_tables {
+            for (tname, _) in &self.scratch_joins {
                 let Some(table) = stm_schema::find_table(tname) else { continue };
                 let is_auto = self.scratch_auto_added.iter().any(|a| a == tname);
                 let header_label = if is_auto {
@@ -1231,7 +1507,10 @@ impl App {
                 col_groups.push(
                     text(header_label)
                         .size(fs - 2.0)
-                        .color(iced::Color { a: if is_auto { 0.5 } else { 0.75 }, r: 0.4, g: 0.55, b: 0.75 })
+                        .color(iced::Color {
+                            a: if is_auto { 0.5 } else { 0.75 },
+                            r: 0.4, g: 0.55, b: 0.75,
+                        })
                         .into(),
                 );
                 let checks: Vec<Element<Message>> = table
@@ -1239,8 +1518,8 @@ impl App {
                     .iter()
                     .map(|col| {
                         let qualified = format!("{}.{}", table.name, col.name);
-                        let checked = self.scratch_columns.contains(&qualified);
-                        let q2 = qualified.clone();
+                        let checked   = self.scratch_columns.contains(&qualified);
+                        let q2        = qualified.clone();
                         checkbox(
                             format!("{:<14}  {}", col.name, col.label),
                             checked,
@@ -1258,30 +1537,99 @@ impl App {
                 );
             }
 
-            // ── Column picker (left half of right panel) ──────────────────
-            let col_selector = container(
-                column![
-                    text("AVAILABLE COLUMNS").size(fs - 3.0)
+            let fields_collapsed = self.scratch_fields_collapsed;
+            let fields_arrow = if fields_collapsed { "▼" } else { "▲" };
+
+            // Fixed "AVAILABLE FIELDS ▲" collapse toggle
+            let fields_top = button(
+                row![
+                    text("AVAILABLE FIELDS").size(fs - 3.0)
                         .color(iced::Color { a: 0.5, r: 0.5, g: 0.5, b: 0.5 }),
+                    horizontal_space(),
+                    text(fields_arrow).size(fs - 3.0)
+                        .color(iced::Color { a: 0.4, r: 0.5, g: 0.5, b: 0.5 }),
+                ]
+                .align_y(Vertical::Center),
+            )
+            .on_press(Message::ScratchToggleFields)
+            .padding([0, 0])
+            .width(Length::Fill)
+            .style(|_theme: &Theme, _status| button::Style {
+                background: None,
+                text_color: Color::TRANSPARENT,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+            });
+
+            // Sticky subheader — table whose section just crossed the top of the scroll
+            let sticky_tname = self.scratch_active_table.as_deref().unwrap_or("");
+            let sticky_el: Element<Message> = if let Some(t) = stm_schema::find_table(sticky_tname) {
+                let is_auto = self.scratch_auto_added.iter().any(|a| a == t.name);
+                let suffix  = if is_auto { " (auto-added)" } else { "" };
+                container(
+                    text(format!("{} — {}{}", t.name, t.label, suffix))
+                        .size(fs - 2.0)
+                        .color(iced::Color { a: 0.85, r: 0.45, g: 0.60, b: 0.80 }),
+                )
+                .padding([3, 2])
+                .width(Length::Fill)
+                .style(|theme: &Theme| container::Style {
+                    background: Some(
+                        mix(
+                            theme.extended_palette().background.base.color,
+                            theme.extended_palette().primary.base.color,
+                            0.08,
+                        )
+                        .into(),
+                    ),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .into()
+            } else {
+                text("").size(fs - 3.0).into()
+            };
+
+            let col_selector_inner: Element<Message> = if fields_collapsed {
+                fields_top.into()
+            } else {
+                column![
+                    fields_top,
+                    sticky_el,
                     scrollable(column(col_groups).spacing(8))
+                        .on_scroll(|vp| Message::ScratchFieldsScrolled(vp.absolute_offset().y))
                         .height(Length::Fill),
                 ]
-                .spacing(6)
-                .height(Length::Fill),
-            )
-            .padding([8, 10])
-            .height(Length::Fixed(280.0))
-            .width(Length::FillPortion(1))
-            .style(|theme: &Theme| {
-                let pal = theme.extended_palette();
-                container::Style {
-                    background: Some(
-                        mix(pal.background.base.color, pal.primary.base.color, 0.04).into(),
-                    ),
-                    border: Border { radius: 6.0.into(), ..Default::default() },
-                    ..Default::default()
-                }
-            });
+                .spacing(4)
+                .height(Length::Fill)
+                .into()
+            };
+            let fields_height = if fields_collapsed {
+                Length::Fixed(36.0)
+            } else {
+                Length::Fixed(280.0)
+            };
+            let col_selector = container(col_selector_inner)
+                .padding([8, 10])
+                .height(fields_height)
+                .width(Length::Fixed(self.scratch_fields_width))
+                .style(|theme: &Theme| {
+                    let pal = theme.extended_palette();
+                    container::Style {
+                        background: Some(
+                            mix(pal.background.base.color, pal.primary.base.color, 0.04).into(),
+                        ),
+                        border: Border { radius: 6.0.into(), ..Default::default() },
+                        ..Default::default()
+                    }
+                });
+
+            // Drag handle between Fields column and Column Order column
+            let fields_drag_active = self.scratch_divider_drag == Some(ScratchDivider::Fields);
+            let fields_divider = scratch_divider(ScratchDivider::Fields, fields_drag_active);
 
             // ── Column order (right half of right panel) ──────────────────
             let drag_idx  = self.scratch_drag_idx;
@@ -1381,46 +1729,80 @@ impl App {
                 "COLUMN ORDER  —  drag ⠿ to reorder"
             };
 
-            let order_body: Element<Message> = if self.scratch_columns.is_empty()
-                && self.scratch_unknown_columns.is_empty()
-            {
-                text("Check columns on the left to add them here.")
-                    .size(fs - 2.0)
-                    .color(iced::Color { a: 0.4, r: 0.5, g: 0.5, b: 0.5 })
-                    .into()
+            let order_collapsed = self.scratch_order_collapsed;
+            let order_arrow = if order_collapsed { "▼" } else { "▲" };
+            let order_header = button(
+                row![
+                    text(order_hint).size(fs - 3.0)
+                        .color(iced::Color { a: 0.5, r: 0.5, g: 0.5, b: 0.5 }),
+                    horizontal_space(),
+                    text(order_arrow).size(fs - 3.0)
+                        .color(iced::Color { a: 0.4, r: 0.5, g: 0.5, b: 0.5 }),
+                ]
+                .align_y(Vertical::Center),
+            )
+            .on_press(Message::ScratchToggleOrder)
+            .padding([0, 0])
+            .width(Length::Fill)
+            .style(|_theme: &Theme, _status| button::Style {
+                background: None,
+                text_color: Color::TRANSPARENT,
+                border: Border::default(),
+                shadow: iced::Shadow::default(),
+            });
+
+            let order_body: Element<Message> = if order_collapsed {
+                order_header.into()
             } else {
-                scrollable(column(order_rows).spacing(3))
+                let body_content: Element<Message> = if self.scratch_columns.is_empty()
+                    && self.scratch_unknown_columns.is_empty()
+                {
+                    text("Check columns on the left to add them here.")
+                        .size(fs - 2.0)
+                        .color(iced::Color { a: 0.4, r: 0.5, g: 0.5, b: 0.5 })
+                        .into()
+                } else {
+                    scrollable(column(order_rows).spacing(3))
+                        .height(Length::Fill)
+                        .into()
+                };
+                column![order_header, body_content]
+                    .spacing(6)
                     .height(Length::Fill)
                     .into()
             };
+            let order_height = if order_collapsed {
+                Length::Fixed(36.0)
+            } else {
+                Length::Fixed(280.0)
+            };
 
             let col_order = mouse_area(
-                container(
-                    column![
-                        text(order_hint).size(fs - 3.0)
-                            .color(iced::Color { a: 0.5, r: 0.5, g: 0.5, b: 0.5 }),
-                        order_body,
-                    ]
-                    .spacing(6)
-                    .height(Length::Fill),
-                )
-                .padding([8, 10])
-                .height(Length::Fixed(280.0))
-                .width(Length::FillPortion(1))
-                .style(|theme: &Theme| {
-                    let pal = theme.extended_palette();
-                    container::Style {
-                        background: Some(
-                            mix(pal.background.base.color, pal.primary.base.color, 0.07).into(),
-                        ),
-                        border: Border { radius: 6.0.into(), ..Default::default() },
-                        ..Default::default()
-                    }
-                }),
+                container(order_body)
+                    .padding([8, 10])
+                    .height(order_height)
+                    .width(Length::Fill)
+                    .style(|theme: &Theme| {
+                        let pal = theme.extended_palette();
+                        container::Style {
+                            background: Some(
+                                mix(pal.background.base.color, pal.primary.base.color, 0.07).into(),
+                            ),
+                            border: Border { radius: 6.0.into(), ..Default::default() },
+                            ..Default::default()
+                        }
+                    }),
             )
             .on_release(Message::ScratchDragCancel);
 
-            let pickers = row![col_selector, col_order].spacing(8).height(Length::Fixed(280.0));
+            let pickers_height = if fields_collapsed && order_collapsed {
+                Length::Fixed(36.0)
+            } else {
+                Length::Fixed(280.0)
+            };
+            let pickers = row![col_selector, fields_divider, col_order]
+                .spacing(0)
+                .height(pickers_height);
 
             let scratch_sql_text = self.scratch_sql.text();
             let actions = row![
@@ -1428,15 +1810,97 @@ impl App {
                 horizontal_space(),
                 ghost_btn("Copy SQL", fs).on_press(Message::ScratchCopyToClipboard),
                 ghost_btn("Email SQL", fs).on_press(Message::EmailSql(scratch_sql_text)),
+                solid_btn("Save as Template", fs).on_press(Message::ScratchShowSaveForm),
             ]
             .spacing(6)
             .align_y(Vertical::Center);
+
+            // ── Save-as-Template inline form ──────────────────────────────
+            let save_form: Option<Element<Message>> = if self.scratch_save_open {
+                let name_input = flat_input("Template name *", &self.scratch_save_name, fs)
+                    .on_input(Message::ScratchSaveNameInput)
+                    .width(Length::Fill);
+                let desc_input = flat_input("Description (optional)", &self.scratch_save_desc, fs)
+                    .on_input(Message::ScratchSaveDescInput)
+                    .width(Length::Fill);
+
+                let mut form_rows: Vec<Element<Message>> = vec![
+                    row![
+                        text("Save as Template").size(fs),
+                        horizontal_space(),
+                        ghost_btn("✕ Cancel", fs).on_press(Message::ScratchCloseSaveForm),
+                    ]
+                    .align_y(Vertical::Center)
+                    .into(),
+                    row![
+                        text("Name").size(fs - 1.0).width(Length::Fixed(90.0)),
+                        Element::from(name_input),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center)
+                    .into(),
+                    row![
+                        text("Description").size(fs - 1.0).width(Length::Fixed(90.0)),
+                        Element::from(desc_input),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center)
+                    .into(),
+                ];
+
+                if let Some(ref e) = self.scratch_save_error {
+                    form_rows.push(
+                        text(format!("⚠  {e}"))
+                            .size(fs - 2.0)
+                            .color(Color::from_rgb(0.85, 0.32, 0.32))
+                            .into(),
+                    );
+                }
+
+                form_rows.push(
+                    row![
+                        horizontal_space(),
+                        solid_btn("Save Template", fs).on_press(Message::ScratchSaveAsTemplate),
+                    ]
+                    .into(),
+                );
+
+                Some(
+                    container(column(form_rows).spacing(8))
+                        .padding([12, 14])
+                        .width(Length::Fill)
+                        .style(|theme: &Theme| {
+                            let pal = theme.extended_palette();
+                            container::Style {
+                                background: Some(
+                                    mix(pal.background.base.color, pal.primary.base.color, 0.10)
+                                        .into(),
+                                ),
+                                border: Border {
+                                    radius: 6.0.into(),
+                                    width: 1.0,
+                                    color: Color {
+                                        a: 0.25,
+                                        ..pal.primary.base.color
+                                    },
+                                },
+                                ..Default::default()
+                            }
+                        })
+                        .into(),
+                )
+            } else {
+                None
+            };
+
+            let sql_drag_active = self.scratch_divider_drag == Some(ScratchDivider::SqlHeight);
+            let sql_h_divider = scratch_h_divider(sql_drag_active);
 
             let editor = text_editor(&self.scratch_sql)
                 .on_action(Message::ScratchSqlEditorAction)
                 .font(iced::Font::MONOSPACE)
                 .size(fs - 1.0)
-                .height(Length::Fill)
+                .height(Length::Fixed(self.scratch_sql_height))
                 .style(|theme: &Theme, status| {
                     let mut s = iced::widget::text_editor::default(theme, status);
                     s.border.width = 0.0;
@@ -1448,6 +1912,7 @@ impl App {
             if let Some(notice) = auto_notice { content.push(notice); }
             content.push(pickers.into());
             content.push(actions.into());
+            if let Some(form) = save_form { content.push(form); }
             if let Some(ref e) = self.email_error {
                 content.push(
                     text(format!("⚠ {e}"))
@@ -1456,6 +1921,10 @@ impl App {
                         .into(),
                 );
             }
+            if self.email_fallback {
+                content.push(email_fallback_panel(self.scratch_sql.text(), fs));
+            }
+            content.push(sql_h_divider);
             content.push(editor.into());
 
             container(
@@ -1469,7 +1938,8 @@ impl App {
             .into()
         };
 
-        row![left, right]
+        row![left, tables_divider, right]
+            .spacing(0)
             .height(Length::Fill)
             .into()
     }
@@ -1638,6 +2108,9 @@ impl App {
         }
         if let Some(e) = email_err_row {
             content.push(e);
+        }
+        if self.email_fallback {
+            content.push(email_fallback_panel(self.sql_editor.text(), fs));
         }
         content.push(actions.into());
         content.push(editor.into());
@@ -2222,6 +2695,127 @@ fn view_customiser<'a>(c: &'a QueryCustomiser, fs: f32) -> Element<'a, Message> 
     .into()
 }
 
+// ── Email client detection & launch ──────────────────────────────────────────
+
+/// Returns `Ok(true)` if a client was found and spawned,
+/// `Ok(false)` if no supported client was found,
+/// `Err(msg)` if a client was found but failed to start.
+fn launch_email_client(uri: String) -> Result<bool, String> {
+    match build_email_command(&uri) {
+        Some(mut cmd) => cmd.spawn().map(|_| true).map_err(|e| e.to_string()),
+        None => Ok(false),
+    }
+}
+
+/// Build the OS-specific `Command` for the first email client found.
+/// Priority: Outlook → Thunderbird → Apple Mail (macOS only).
+fn build_email_command(uri: &str) -> Option<std::process::Command> {
+    match std::env::consts::OS {
+        "macos"   => email_cmd_macos(uri),
+        "windows" => email_cmd_windows(uri),
+        _         => email_cmd_linux(uri),
+    }
+}
+
+fn email_cmd_macos(uri: &str) -> Option<std::process::Command> {
+    // Microsoft Outlook
+    if std::path::Path::new("/Applications/Microsoft Outlook.app").exists() {
+        let mut c = std::process::Command::new("open");
+        c.args(["-a", "Microsoft Outlook", uri]);
+        return Some(c);
+    }
+    // Thunderbird
+    if std::path::Path::new("/Applications/Thunderbird.app").exists() {
+        let mut c = std::process::Command::new("open");
+        c.args(["-a", "Thunderbird", uri]);
+        return Some(c);
+    }
+    // Apple Mail — always present on macOS
+    let mut c = std::process::Command::new("open");
+    c.args(["-a", "Mail", uri]);
+    Some(c)
+}
+
+fn email_cmd_windows(uri: &str) -> Option<std::process::Command> {
+    // Microsoft Outlook — common install paths for Microsoft 365 / Office 2016-2021
+    let outlook_paths = [
+        r"C:\Program Files\Microsoft Office\root\Office16\OUTLOOK.EXE",
+        r"C:\Program Files (x86)\Microsoft Office\root\Office16\OUTLOOK.EXE",
+        r"C:\Program Files\Microsoft Office\Office16\OUTLOOK.EXE",
+        r"C:\Program Files\Microsoft Office 15\root\office15\OUTLOOK.EXE",
+        r"C:\Program Files (x86)\Microsoft Office\Office15\OUTLOOK.EXE",
+    ];
+    for p in &outlook_paths {
+        if std::path::Path::new(p).exists() {
+            let mut c = std::process::Command::new(p);
+            c.arg(uri);
+            return Some(c);
+        }
+    }
+    // Mozilla Thunderbird
+    let tb_paths = [
+        r"C:\Program Files\Mozilla Thunderbird\thunderbird.exe",
+        r"C:\Program Files (x86)\Mozilla Thunderbird\thunderbird.exe",
+    ];
+    for p in &tb_paths {
+        if std::path::Path::new(p).exists() {
+            let mut c = std::process::Command::new(p);
+            c.arg(uri);
+            return Some(c);
+        }
+    }
+    // Thunderbird via PATH (portable / scoop / winget installs)
+    if exe_in_path("thunderbird.exe") {
+        let mut c = std::process::Command::new("thunderbird");
+        c.arg(uri);
+        return Some(c);
+    }
+    None
+}
+
+fn email_cmd_linux(uri: &str) -> Option<std::process::Command> {
+    // Thunderbird — common package-manager and snap install locations
+    let tb_paths = [
+        "/usr/bin/thunderbird",
+        "/usr/local/bin/thunderbird",
+        "/snap/bin/thunderbird",
+    ];
+    for p in &tb_paths {
+        if std::path::Path::new(p).exists() {
+            let mut c = std::process::Command::new(p);
+            c.arg(uri);
+            return Some(c);
+        }
+    }
+    // Thunderbird via PATH (includes flatpak exports at ~/.local/share/flatpak/exports/bin)
+    if exe_in_path("thunderbird") {
+        let mut c = std::process::Command::new("thunderbird");
+        c.arg(uri);
+        return Some(c);
+    }
+    // Thunderbird via flatpak run
+    if exe_in_path("flatpak") {
+        let installed = std::process::Command::new("flatpak")
+            .args(["info", "org.mozilla.Thunderbird"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if installed {
+            let mut c = std::process::Command::new("flatpak");
+            c.args(["run", "org.mozilla.Thunderbird", uri]);
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Returns `true` if `exe` is found in any directory on `$PATH`.
+fn exe_in_path(exe: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).any(|dir| dir.join(exe).exists()))
+        .unwrap_or(false)
+}
+
 /// Percent-encode a string for use in a `mailto:` URI body.
 fn percent_encode(s: &str) -> String {
     s.bytes().fold(String::with_capacity(s.len() * 2), |mut out, b| {
@@ -2234,6 +2828,117 @@ fn percent_encode(s: &str) -> String {
         }
         out
     })
+}
+
+/// Estimate the rendered pixel height of a table section in the fields scroll panel.
+/// Uses font size and column count to approximate: header row + N checkbox rows + spacing.
+fn fields_section_height(col_count: usize, fs: f32) -> f32 {
+    let line_h   = fs * 1.40;                         // approximate text line height
+    let header_h = line_h + 8.0;                      // group label + col_groups spacing(8)
+    let check_h  = (fs - 2.0) * 1.40 + 3.0;          // checkbox row + spacing(3)
+    let body_h   = col_count as f32 * check_h + 4.0; // padding([2,12]) → 4px vert
+    header_h + body_h
+}
+
+/// Walk the join list and return the name of the table whose header most recently
+/// scrolled past the top of the visible area (i.e., the "current" sticky section).
+fn fields_active_table_at(
+    joins: &[(String, String)],
+    scroll_y: f32,
+    fs: f32,
+) -> Option<String> {
+    let mut y = 0.0;
+    let mut active: Option<String> = joins.first().map(|(t, _)| t.clone());
+    for (tname, _) in joins {
+        if y > scroll_y {
+            break;
+        }
+        active = Some(tname.clone());
+        let col_count = stm_schema::find_table(tname)
+            .map(|t| t.columns.len())
+            .unwrap_or(0);
+        y += fields_section_height(col_count, fs);
+    }
+    active
+}
+
+/// Thin horizontal drag handle above the SQL editor — drag up/down to resize.
+fn scratch_h_divider(active: bool) -> Element<'static, Message> {
+    mouse_area(
+        container(text(""))
+            .width(Length::Fill)
+            .height(Length::Fixed(6.0))
+            .style(move |theme: &Theme| {
+                let pal = theme.extended_palette();
+                let color = if active {
+                    pal.primary.base.color
+                } else {
+                    mix(pal.background.base.color, pal.primary.base.color, 0.25)
+                };
+                container::Style {
+                    background: Some(color.into()),
+                    ..Default::default()
+                }
+            }),
+    )
+    .on_press(Message::ScratchDividerPress(ScratchDivider::SqlHeight))
+    .into()
+}
+
+/// Thin vertical drag handle placed between resizable panels.
+/// Shows a highlighted bar when `active` (currently being dragged).
+fn scratch_divider(target: ScratchDivider, active: bool) -> Element<'static, Message> {
+    mouse_area(
+        container(text(""))
+            .width(Length::Fixed(6.0))
+            .height(Length::Fill)
+            .style(move |theme: &Theme| {
+                let pal = theme.extended_palette();
+                let color = if active {
+                    pal.primary.base.color
+                } else {
+                    mix(pal.background.base.color, pal.primary.base.color, 0.25)
+                };
+                container::Style {
+                    background: Some(color.into()),
+                    ..Default::default()
+                }
+            }),
+    )
+    .on_press(Message::ScratchDividerPress(target))
+    .into()
+}
+
+/// Panel shown when no known email client (Outlook / Thunderbird / Apple Mail) was found.
+fn email_fallback_panel(sql: String, fs: f32) -> Element<'static, Message> {
+    let copy_btn = solid_btn("Copy SQL", fs)
+        .on_press(Message::CopyText(sql));
+
+    container(
+        column![
+            text("No email client found (Outlook, Thunderbird, or Apple Mail).").size(fs),
+            text("Copy the SQL below and paste it into your email client.").size(fs - 1.0),
+            copy_btn,
+        ]
+        .spacing(8),
+    )
+    .padding([10, 14])
+    .width(Length::Fill)
+    .style(|theme: &Theme| {
+        let pal = theme.extended_palette();
+        container::Style {
+            background: Some(
+                mix(pal.background.base.color, pal.danger.base.color, 0.12).into(),
+            ),
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: Color { a: 0.35, ..pal.danger.base.color },
+            },
+            ..Default::default()
+        }
+    })
+    .into()
 }
 
 fn code_block(content: Element<'_, Message>) -> Element<'_, Message> {
